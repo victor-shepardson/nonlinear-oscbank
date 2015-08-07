@@ -1,40 +1,105 @@
 #pragma once
-#include "math.h"
+#include <cmath>
 #include <complex>
+#include <vector>
 
-template<typename nobs_float> class NOBS {
+namespace NOBS{
+constexpr auto pi  = 3.14159265359;
+template<typename nobs_float> class bank {
 private:
-	nobs_float samplerate, f0, bands_per_octave, ent;
+	const int SCALE_MAX = 8192;
+	nobs_float samplerate, framerate, f0, bands_per_octave, octaves, ent;
 	vector<nobs_float> eps;
-	struct oscillator{
-		nobs_float amp, target_amp, lambda, freq, phase, temp;
+	// class storing the data for a complex sinusoidal oscillator: 
+	// phase*=frequency at each sample
+	// output = real(phase)*amp
+	class oscillator{
+	public:
+		nobs_float amp, target_amp, rfreq;
+		complex<nobs_float> freq, phase, temp;
+		oscillator(){
+			amp = target_amp = 0.;
+			phase = temp = polar(nobs_float(1), nobs_float(0));
+			setFrequency(0);
+		}
+		//hang on to the real frequency (in radians/sample)
+		//and set the complex frequency increment
+		void setFrequency(nobs_float f){
+			freq = polar(nobs_float(1), f);
+			rfreq = f;
+		}
 	};
 	vector<oscillator> oscs;
 	//store the last complex sample at each scale, needed for interpolation b/t ticks
-	vector<complex<nobs_float> > prev_vals;
-	//phi pre-wrapped from -1 to 1
-	inline nobs_float fastSinUnit(nobs_float x){
-	    const nobs_float xsqu = x*x;
-	    const nobs_float a = 1.661;
-	    const nobs_float b = -4.75447;
-	    const nobs_float c = -a-b;
-	    return x*(xsqu*(xsqu*a+b)+c);
+	vector< complex<nobs_float> > prev_vals;
+
+	//from silicon graphics via https://en.wikipedia.org/wiki/Fast_inverse_square_root
+	inline nobs_float invSqrt( nobs_float x )
+	{
+		const float x2 = x * 0.5;
+		float y  = x;
+		long i  = * ( long * ) &y;                   
+		i = 0x5f375a86 - ( i >> 1 );
+		//i  = 0x5f3759df - ( i >> 1 );
+		y  = * ( float * ) &i;
+		y  = y * ( float(1.5) - ( x2 * y * y ) ); 
+	//	y  = y * ( float(1.5) - ( x2 * y * y ) ); 
+		return y;
 	}
-	//fast wrap for small x
-	inline nobs_float wrapUnit(nobs_float x){
-	    while(x>1) x-=2;
-	    while(x<-1) x+=2;
+	inline nobs_float fastSqrt(nobs_float x){
+		return x*invSqrt(x);
+	}
+	//wrap small x to -pi, pi
+	inline nobs_float wrap(nobs_float x){
+		while(x > pi) x -= 2*pi;
+	    while(x < -pi) x += 2*pi;
 	    return x;
 	}
+	//from http://forum.devmaster.net/t/fast-and-accurate-sine-cosine/9648
+	inline nobs_float fastSinNoWrap(nobs_float x){
+		const nobs_float B = 4/pi;
+		const nobs_float C = -4/(pi*pi);
+
+		nobs_float y = B * x + C * x * abs(x);
+
+		const nobs_float P = 0.225;
+
+		return P * (y * abs(y) - y) + y;   // Q * y + P * y * abs(y)
+	}
+	inline nobs_float fastSin(nobs_float x){
+		return fastSinNoWrap(wrap(x));
+	}
+	/*inline nobs_float fastArg(complex<nobs_float> c){
+		return arg(c);//fastAtan2(imag(c), real(c));
+	}
+	inline nobs_float fastAbs(complex<nobs_float> c){
+		return fastSqrt(real(c)*real(c)+imag(c)*imag(c));
+	}*/
+	inline complex<nobs_float> fastNormalize(complex<nobs_float> c){
+		return c*invSqrt(real(c)*real(c)+imag(c)*imag(c));
+	}
+	/*inline complex<nobs_float> fastPolar(nobs_float theta){
+		return complex<nobs_float>(fastSin(theta+(.5*pi)), fastSin(theta));
+	}
+	inline complex<nobs_float> fastPolarWithWrap(nobs_float& theta){
+		theta = wrap(theta);
+		const nobs_float theta2 = wrap(theta+(.5*pi));
+		return complex<nobs_float>(fastSinNoWrap(theta2), fastSinNoWrap(theta));
+	}*/
 	//local spectral envelope at b
 	inline nobs_float localEnv(nobs_float a, nobs_float b, nobs_float c){
-	    //if b is smallest, return b
+		return .25*(a+c)+.5*b;
+	    /*//if b is smallest, return b
 	    if(b<=c && b<=a) return b;
 	    //else return clamped sum of larger two
 	    if(a<c) return min(nobs_float(1), b+c);
 	    return min(nobs_float(1), a+b);
+	    */
 	}
 	inline nobs_float mix(nobs_float a, nobs_float b, nobs_float m){
+		return (b-a)*m + a;
+	}
+	inline complex<nobs_float> mix(complex<nobs_float> a, complex<nobs_float> b, nobs_float m){
 		return (b-a)*m + a;
 	}
 	//class managing a vector of signals at different scales
@@ -70,16 +135,15 @@ private:
 	//class to manage multiscale evaluation in tick()
 	class scaleManager{
 	public:
-		int max_scale, scale, scale_idx, samplerate;
+		int max_scale, scale, scale_idx;
 		nobs_float nyquist;
 		inline void reset(){
 			scale = 1;
-			nyquist = 1; //in half cycles per sample
+			nyquist = pi; //in radians per sample
 			scale_idx = 0;
 		}
-		scaleManager(int max_scale, nobs_float samplerate){
+		scaleManager(int max_scale){
 			this->max_scale = max_scale;
-			this->samplerate = samplerate;
 			reset();
 		}
 		inline bool updateAndTest(int samp, nobs_float freq){
@@ -87,47 +151,37 @@ private:
         		scale = scale<<1;
         		nyquist *= .5;
         		scale_idx++;
-				/*cout << "reducing scale at samp "<<samp<<", freq = "<<freq
-					<<": new nyquist = "<<nyquist<<", scale = "<<scale
-					<<", scale_idx = "<<scale_idx<<endl;
-					*/
         	}
         	return (samp & (scale-1));/* scale not computed this sample */
 		}
 	};
 public:
-	NOBS(nobs_float samplerate, nobs_float framerate = 30, nobs_float f0=30, nobs_float bands_per_octave=36, nobs_float octaves=9){
-		this->samplerate = samplerate;
-		this->f0 = f0;
+	bank(nobs_float samplerate, nobs_float f0=30, nobs_float bands_per_octave=36, nobs_float octaves=9){
+		int nbands = int(octaves*bands_per_octave);
+		oscs = vector<oscillator>(nbands);
+
 		this->bands_per_octave = bands_per_octave;
+		this->octaves = octaves;
+		this->f0 = f0;
+		setSampleRate(samplerate);
+		setFrameRate(30);
 
 		//set up constants for amplitude smoothing filter at different scales
 		//also populate prev_vals
 		//todo: a better low pass filter
-		for(int scale=1; scale<=8192; scale*=2){
-			this->eps.push_back(1-pow(.05, scale*framerate/samplerate));
+		for(int scale=1; scale<=SCALE_MAX; scale*=2){
 			prev_vals.push_back(complex<nobs_float>());
 		}
-
-		int nbands = int(octaves*bands_per_octave);
-		for(int i=0; i<nbands; i++){
-	        oscillator osc;
-	        osc.amp = osc.target_amp = 0;
-	        osc.freq = f0*pow(2., i/bands_per_octave)/samplerate*2; //in half cycles/sample
-	        osc.phase = 0;
-	        osc.lambda = f0/samplerate*(pow(2., nobs_float(i+1)/bands_per_octave) - pow(2., nobs_float(i)/bands_per_octave));
-	        oscs.push_back(osc);
-    	}
 	}
+	//get the next /samps/ samples
 	vector<nobs_float> tick(int samps){
 		const nobs_float inv_nbands = 1/sqrt(oscs.size());
     	const int nbands = oscs.size();
-        const nobs_float delta = 1e-10;
-
+    	//amplitude floor
+        const nobs_float delta = 1e-12;
 
 		multiscaleVector< complex<nobs_float> > acc(samps);
-
-		scaleManager sm(samps, samplerate);
+		scaleManager sm(samps);
 
 		for(int samp = 0; samp<samps; samp++){
 			//only compute every /scale/ samples
@@ -135,22 +189,39 @@ public:
 			// a frequency below half nyquist for the current scale to know the appropriate scale for each osc
 			// then if the scale has increased past the lowest which should be computed this sample, break
 
-        	//first pass: update amplitudes to approach control-rate target amplitude
+        	//first pass: accumulate signal;
+        	//update amplitudes to approach control-rate target amplitude
+        	//and rotate phase according to nominal frequency
         	sm.reset();
         	for(int idx = nbands-1; idx>=0; idx--){
             	oscillator &osc = oscs[idx];
-            	if(sm.updateAndTest(samp, osc.freq))
+            	if(sm.updateAndTest(samp, osc.rfreq))
             		break;
-            	osc.amp += (osc.target_amp-osc.amp)*eps[sm.scale_idx];
+
+            	osc.phase = osc.temp;
+                acc.accum(sm.scale_idx, samp>>(sm.scale_idx), osc.amp*osc.phase);
+
+            	osc.amp = mix(osc.amp, osc.target_amp, eps[sm.scale_idx]);
+            	
+            	//need to multiply frequency up to scale
+            	complex<nobs_float> freq = osc.freq;
+            	for(int s=0; s<sm.scale_idx; s++)
+            		freq*=freq;
+            	osc.phase *= freq;
+            	osc.temp = osc.phase;
         	}
+        	if(ent<=0) continue;
+    	   	//second pass: entrain oscillators by averaging their complex phase
+        	//and projecting back to unit circle
         	sm.reset();
         	for(int idx = nbands-1; idx>=0; idx--){
 	            oscillator &osc = oscs[idx];
-	            if(sm.updateAndTest(samp, osc.freq))
+	            if(sm.updateAndTest(samp, osc.rfreq))
             		break;
 
 	            //avoid denormals
 	            if(osc.amp<delta){
+	            	if(osc.target_amp<delta) osc.target_amp=0;
 	                osc.amp=0;
 	                continue;
 	            }
@@ -158,25 +229,21 @@ public:
 	            oscillator &osc_below = oscs[max(0,idx-1)];
 	            oscillator &osc_above = oscs[min(nbands-1,idx+1)];
 
-	            nobs_float freq = osc.freq;
-	            nobs_float sigma = osc.amp+osc_above.amp+osc_below.amp;
-	            if(ent>0 && sigma>delta)
-	                freq =  ( osc_below.amp*(osc_below.freq + ent*osc_below.lambda*wrapUnit(osc_below.phase-osc.phase))
-	                        + osc_above.amp*(osc_above.freq + ent*osc_above.lambda*wrapUnit(osc_above.phase-osc.phase))
-	                        + osc.amp*osc.freq
+	            complex<nobs_float> phase = osc.phase;
+	            nobs_float w_c = osc.amp;
+	            nobs_float w_b = osc_below.amp;
+	            nobs_float w_a = osc_above.amp;
+	            nobs_float sigma = w_c+w_a+w_b;
+	            if(sigma>delta){
+	                phase = ( w_b*osc_below.phase
+	                        + w_a*osc_above.phase
+	                        + w_c*osc.phase
 	                        ) / sigma;
-	            osc.phase = wrapUnit(sm.scale*freq+osc.phase);
-	            //note: can probably do better than using sin twice
-	            nobs_float rphase = wrapUnit(.5+osc.phase);
-        	    complex<nobs_float> val = complex<nobs_float>(
-        	    	fastSinUnit(rphase),
-        	    	fastSinUnit(osc.phase));
-
-	            nobs_float amp = localEnv(osc_below.amp, osc.amp, osc_above.amp);
-	            amp *= amp;
-	            amp = amp*amp*osc.amp;
-	            acc.accum(sm.scale_idx, samp>>(sm.scale_idx), amp*val);
-	        }
+	                phase = mix(osc.phase, phase, ent);
+	                phase = fastNormalize(phase);
+				}
+				osc.temp = phase;
+			}
 		}
 
 		//cout << "max scale idx reached = " << sm.max_reached << endl;
@@ -184,8 +251,7 @@ public:
 		//now interpolate within each scale and sum
 		vector<nobs_float> ret = vector<nobs_float>(samps);
 		for(int scale_idx = 0; scale_idx<acc.nscales; scale_idx++){
-			complex<nobs_float> prev = prev_vals[scale_idx];
-			complex<nobs_float> cur;
+			complex<nobs_float> cur, prev = prev_vals[scale_idx];
 			nobs_float prev_abs = abs(prev);
 			nobs_float prev_arg = arg(prev);
 			nobs_float scale = (1<<scale_idx);
@@ -197,7 +263,7 @@ public:
 				nobs_float cur_arg = arg(cur);
 				for(int interp_idx = 0; interp_idx<scale; interp_idx++){
 					nobs_float m = (interp_idx)/scale;
-					if(prev_arg > cur_arg) prev_arg -= 6.28318530718;
+					if(prev_arg > cur_arg) prev_arg -= (2*pi);
 					nobs_float interp_abs = mix(prev_abs, cur_abs, m);
 					nobs_float interp_arg = mix(prev_arg, cur_arg, m);
 					ret[(samp_idx<<scale_idx)+interp_idx] +=
@@ -218,22 +284,35 @@ public:
 	nobs_float getSampleRate(){
 		return samplerate;
 	}
-	nobs_float getF0(){
-		return f0;
-	}
 	nobs_float getBandsPerOctave(){
 		return bands_per_octave;
 	}
 	int getNumBands(){
 		return oscs.size();
 	}
+	nobs_float getFreqByIdx(int idx){
+		return oscs[idx].rfreq;
+	}
 	void setAmplitude(int idx, nobs_float value){
 		//if (idx < 0 || idx > nbands-1) return;
-		oscs[idx].target_amp = value;
+		oscs[idx].target_amp = abs(value);
 	}
 	void setEntrainment(nobs_float e){
-		ent = e;
+		ent = max(nobs_float(0),e);
 	}
-
-
+	void setSampleRate(nobs_float sr){
+		samplerate = sr;
+		for(int i=0; i<oscs.size(); i++){
+	        nobs_float freq = f0*pow(2., i/bands_per_octave)/samplerate*2*pi; //in radians/sample
+	        oscs[i].setFrequency(freq);
+    	}
+    }
+	void setFrameRate(nobs_float fr){
+		framerate = fr;
+		this->eps.clear();
+		for(int scale=1; scale<=SCALE_MAX; scale*=2){
+			this->eps.push_back(1-pow(.05, scale*framerate/samplerate));
+		}
+	}
 };
+}

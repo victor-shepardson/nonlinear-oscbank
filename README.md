@@ -41,4 +41,4 @@ compiles with C++11; for older standards, you probably need to replace NOBS::pi 
 	//the nominal oscillator frequencies are fixed but can be accessed:
 	assert(bands_per_octave == oscbank->getBandsPerOctave());
 	assert(int(bands_per_octave*octaves) == oscbank->getNumBands());
-\	assert(lowest_band == bank->getFreqByIdx(0));
+	assert(lowest_band == bank->getFreqByIdx(0));

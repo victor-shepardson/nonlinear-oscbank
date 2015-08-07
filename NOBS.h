@@ -198,11 +198,17 @@ public:
             	if(sm.updateAndTest(samp, osc.rfreq))
             		break;
 
+            	//avoid denormals
+	            if(osc.amp<delta && osc.target_amp<delta){
+	            	osc.amp = osc.target_amp=0;
+	                continue;
+	            }
+
             	osc.phase = osc.temp;
                 acc.accum(sm.scale_idx, samp>>(sm.scale_idx), osc.amp*osc.phase);
 
             	osc.amp = mix(osc.amp, osc.target_amp, eps[sm.scale_idx]);
-            	
+
             	//need to multiply frequency up to scale
             	complex<nobs_float> freq = osc.freq;
             	for(int s=0; s<sm.scale_idx; s++)
@@ -218,13 +224,6 @@ public:
 	            oscillator &osc = oscs[idx];
 	            if(sm.updateAndTest(samp, osc.rfreq))
             		break;
-
-	            //avoid denormals
-	            if(osc.amp<delta){
-	            	if(osc.target_amp<delta) osc.target_amp=0;
-	                osc.amp=0;
-	                continue;
-	            }
 	            //faster to store these outside of loop and only access oscs once per iteration?
 	            oscillator &osc_below = oscs[max(0,idx-1)];
 	            oscillator &osc_above = oscs[min(nbands-1,idx+1)];
